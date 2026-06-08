@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+import argparse
+import random
+from PIL import Image
+import mido
+from mido import Message, MidiFile, MidiTrack
+
+def image_to_midi(image_path, humanize=False):
+    # 1. Open the image and convert to grayscale for simplicity
+    img = Image.open(image_path).convert('L')
+    # Resize so we don't end up with millions of notes (width = time steps, height = pitch range)
+    img = img.resize((64, 32)) 
+    width, height = img.size
+
+    mid = MidiFile()
+    track = MidiTrack()
+    mid.tracks.append(track)
+
+    # Set a default tempo
+    track.append(mido.MetaMessage('set_tempo', tempo=mido.bpm2tempo(120)))
+
+    # 2. Map pixels to MIDI data
+    # Scan left-to-right (time steps)
+    for x in range(width):
+        notes_in_step = []
+        for y in range(height):
+            pixel_brightness = img.getpixel((x, y))
+            
+            # If the pixel is bright enough, trigger a note
+            if pixel_brightness > 127: 
+                # Map Y coordinate to MIDI pitch (lower Y = higher pitch in screen space)
+                pitch = 36 + (height - y) # Range roughly from C2 to G4
+                
+                # Base velocity mapped to brightness
+                velocity = int((pixel_brightness / 255) * 127)
+                
+                # 3. Apply Humanization
+                if humanize:
+                    # Subtle random shifts in velocity (-15 to +15) bounded between 1 and 127
+                    velocity += random.randint(-15, 15)
+                    velocity = max(1, min(127, velocity))
+                
+                notes_in_step.append((pitch, velocity))
+        
+        # Add the notes to the track
+        # To keep it simple, we play notes simultaneously per column, then advance time
+        for pitch, vel in notes_in_step:
+            track.append(Message('note_on', note=pitch, velocity=vel, time=0))
+        
+        # Advance time after the column plays (480 ticks = 1 quarter note)
+        if notes_in_step:
+            track.append(Message('note_off', note=notes_in_step[0][0], velocity=0, time=240))
+        else:
+            track.append(Message('note_off', note=0, velocity=0, time=240))
+
+    return mid
+
+def main():
+    parser = argparse.ArgumentParser(description="Convert an image into a MIDI melody.")
+    parser.add_argument("image", help="Path to the picture.jpg")
+    parser.add_argument("--velocity", choices=["humanize", "default"], default="default", 
+                        help="Choose whether to humanize the note velocities.")
+    # Soundfont argument accepted to match your syntax, though handled by Fluidsynth later
+    parser.add_argument("--soundfont", help="Path to FluidSynth soundfont.sf2") 
+
+    args = parser.parse_args()
+
+    output_midi = "output.mid"
+    is_humanized = (args.velocity == "humanize")
+    
+    print(f"🎨 Analyzing {args.image}...")
+    midi_data = image_to_midi(args.image, humanize=is_humanized)
+    midi_data.save(output_midi)
+    print(f"🎵 Generated {output_midi} successfully (Humanize: {is_humanized})!")
+
+if __name__ == "__main__":
+    main()
