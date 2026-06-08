@@ -12,15 +12,9 @@ def get_scale():
     return bass_scale, chord_scale, melody_scale
 
 def analyze_image_color_mood(img_rgb):
-    """
-    Finds the most dominant, saturated colors in the image rather than a flat average,
-    preventing colorful images with dark backgrounds from being flagged as monochrome.
-    """
-    # 1. Reduce image to its 4 most dominant adaptive colors
     small_img = img_rgb.resize((100, 100))
     paletted = small_img.convert('P', palette=Image.Palette.ADAPTIVE, colors=4)
     
-    # Extract the RGB values of those 4 dominant colors
     palette_colors = paletted.getcolors()
     rgb_palette = paletted.getpalette()
     
@@ -33,16 +27,12 @@ def analyze_image_color_mood(img_rgb):
             b = rgb_palette[idx+2]
             dominant_rgb_colors.append((r, g, b, count))
 
-    # 2. Analyze which of these dominant colors has the highest vibrant bias
     best_r, best_g, best_b = 127, 127, 127
     highest_vibrancy = -1
     
     for r, g, b, count in dominant_rgb_colors:
-        # Avoid counting near-black or near-white background blocks as the vibrant "mood"
         if (r + g + b) < 60 or (r + g + b) > 700:
             continue
-            
-        # Vibrancy is defined by how much one channel stands out from the others
         vibrancy = max(r, g, b) - min(r, g, b)
         if vibrancy > highest_vibrancy:
             highest_vibrancy = vibrancy
@@ -50,30 +40,26 @@ def analyze_image_color_mood(img_rgb):
 
     print(f"🎨 Vibrant Color Detected -> Red: {best_r}, Green: {best_g}, Blue: {best_b} (Vibrancy: {highest_vibrancy})")
 
-    # Default baseline
-    melody, chord, bass = 80, 16, 33  # Square Lead, Organ, Finger Bass
+    melody, chord, bass = 80, 16, 33  
 
-    # Lower the threshold. If vibrancy is less than 35, it's truly a muted/monochrome picture
     if highest_vibrancy < 35:
         print("🎛️ Mood Detected: Muted/Monochromatic -> Choosing Acoustic Piano & Organ Profile.")
-        melody, chord, bass = 0, 16, 32  # Acoustic Piano, Organ, Acoustic Bass
+        melody, chord, bass = 0, 16, 32  
     elif max(best_r, best_g, best_b) == best_r:
         print("🔥 Mood Detected: Dominant Warmth/Red -> Choosing Bright Brass & Synth Lead Profile.")
-        melody, chord, bass = 62, 81, 38  # Synth Brass 2, Saw Lead, Synth Bass 1
+        melody, chord, bass = 62, 81, 38  
     elif max(best_r, best_g, best_b) == best_g:
         print("🌿 Mood Detected: Dominant Nature/Green/Yellow -> Choosing Woodwind & Nylon Guitar Profile.")
-        melody, chord, bass = 73, 24, 33  # Flute, Acoustic Nylon Guitar, Finger Bass
+        melody, chord, bass = 73, 24, 33  
     elif max(best_r, best_g, best_b) == best_b:
         print("❄️ Mood Detected: Dominant Cool/Blue -> Choosing Chilled Space & Synth Pad Profile.")
-        melody, chord, bass = 81, 89, 39  # Saw Lead, Warm Pad, Synth Bass 2
+        melody, chord, bass = 81, 89, 39  
 
     return melody, chord, bass
 
 def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=False):
-    # Load original image in RGB mode to analyze color arrays
     img_orig = Image.open(image_path).convert('RGB')
     
-    # 1. Determine Instruments via Color if they aren't explicitly forced
     if melody_patch is None or chord_patch is None or bass_patch is None:
         auto_m, auto_c, auto_b = analyze_image_color_mood(img_orig)
         melody_patch = melody_patch if melody_patch is not None else auto_m
@@ -82,7 +68,6 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
 
     print(f"🎹 Instrument Loadout -> Melody: #{melody_patch} | Chords: #{chord_patch} | Bass: #{bass_patch}")
 
-    # Now drop down sample grid for the notes via grayscale conversion
     img = img_orig.convert('L').resize((64, 30))
     width, height = img.size
 
@@ -91,11 +76,10 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
     mid.tracks.append(track)
     track.append(mido.MetaMessage('set_tempo', tempo=mido.bpm2tempo(120)))
 
-    # Set patches inside selected midi channels
     track.append(Message('program_change', program=melody_patch, channel=0, time=0))
     track.append(Message('program_change', program=chord_patch, channel=1, time=0))
     track.append(Message('program_change', program=bass_patch, channel=2, time=0))
-    track.append(Message('program_change', program=0, channel=9, time=0)) # Drum kit channel
+    track.append(Message('program_change', program=0, channel=9, time=0)) 
 
     bass_scale, chord_scale, melody_scale = get_scale()
     active_notes = []
@@ -104,22 +88,46 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
         step_notes = [] 
         x_next = min(x + 1, width - 1)
 
-        # DRUM SEQUENCER ENGINE
+        # ----------------------------------------------------
+        # 1. IMAGE-DRIVEN DYNAMIC DRUM GENERATOR
+        # ----------------------------------------------------
+        # Calculate the raw visual contrast change for this exact vertical slice
+        slice_deltas = [abs(img.getpixel((x, y)) - img.getpixel((x_next, y))) for y in range(height)]
+        avg_delta = sum(slice_deltas) / len(slice_deltas)
+        max_delta = max(slice_deltas) if slice_deltas else 0
+
+        # Look at pixel columns to find where white/light masses are clumped vertically
         col_brightness = [img.getpixel((x, y)) for y in range(height)]
         avg_brightness = sum(col_brightness) / len(col_brightness)
 
-        hh_vel = 75 if avg_brightness < 127 else 95
+        # A. Hi-Hat Rhythms (Varies texture based on image lighting)
         if x % 2 == 0:
-            step_notes.append((42, hh_vel, 9)) 
-        elif x % 4 == 3 and avg_brightness > 140:
-            step_notes.append((46, 80, 9))  
+            if avg_brightness > 160:
+                step_notes.append((46, 85, 9))  # Open Hi-Hat if passing a bright patch
+            else:
+                step_notes.append((42, 75, 9))  # Standard Closed Hi-Hat
+        elif avg_delta > 35:
+            step_notes.append((42, 55, 9))      # Extra rapid 16th hat roll on highly complex lines
 
-        if x % 4 == 0:
-            step_notes.append((36, 100, 9)) 
-        if x % 8 == 4:
-            step_notes.append((38, 95, 9))  
+        # B. Image Edge-Driven Kick Drum
+        # Instead of every step 0, 4, 8... the kick is triggered by the composition's contours
+        # We enforce a baseline safety kick on step 0 to keep the rhythm grounded.
+        if x == 0 or (avg_delta > 25 and x % 2 == 0):
+            kick_vel = min(115, int((avg_delta / 255) * 50) + 70)
+            step_notes.append((36, kick_vel, 9))
 
-        # BASS ZONE EDGE SAMPLER
+        # C. Image Edge-Driven Snare Drum
+        # Triggers when a sharp visual feature boundary lands on off-beats
+        if avg_delta > 45 and x % 4 != 0:
+            snare_vel = min(110, int((max_delta / 255) * 40) + 70)
+            step_notes.append((38, snare_vel, 9))
+        # Structural fallback so it doesn't lose a downbeat groove completely
+        elif x % 8 == 4:
+            step_notes.append((38, 85, 9))
+
+        # ----------------------------------------------------
+        # 2. BASS ZONE (Channel 2)
+        # ----------------------------------------------------
         if x % 4 == 0:
             bass_edges = []
             for y in range(20, 30):
@@ -133,7 +141,9 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
                 vel = min(110, int((edge_strength / 255) * 50) + 55)
                 step_notes.append((bass_scale[idx], vel, 2))
 
-        # CHORD ZONE EDGE SAMPLER
+        # ----------------------------------------------------
+        # 3. CHORD ZONE (Channel 1)
+        # ----------------------------------------------------
         if x % 2 == 0:
             chord_edges = []
             for y in range(10, 20):
@@ -150,7 +160,9 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
             for pitch, vel in unique_chords:
                 step_notes.append((pitch, vel, 1))
 
-        # MELODY ZONE EDGE SAMPLER
+        # ----------------------------------------------------
+        # 4. MELODY ZONE (Channel 0)
+        # ----------------------------------------------------
         melody_edges = []
         for y in range(0, 10):
             edge_value = abs(img.getpixel((x, y)) - img.getpixel((x_next, y)))
@@ -163,7 +175,7 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
             vel = min(120, int((edge_strength / 255) * 60) + 55)
             step_notes.append((melody_scale[idx], vel, 0))
 
-        # Humanize
+        # Humanize Pass
         if humanize:
             processed = []
             for pitch, vel, ch in step_notes:
@@ -172,7 +184,7 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
                 processed.append((pitch, vel, ch))
             step_notes = processed
 
-        # Execute note conversions
+        # MIDI Execution
         for old_pitch, old_ch in active_notes:
             track.append(Message('note_off', note=old_pitch, velocity=0, channel=old_ch, time=0))
         active_notes.clear()
@@ -189,13 +201,12 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
     return mid
 
 def main():
-    parser = argparse.ArgumentParser(description="Color-Sensing Image-to-MIDI Converter.")
+    parser = argparse.ArgumentParser(description="Image-Driven Drum Sequencer & Melody Synth.")
     parser.add_argument("image", help="Path to image file")
     parser.add_argument("--velocity", choices=["humanize", "default"], default="default")
     parser.add_argument("--soundfont", help="Path to soundfont file")
     parser.add_argument("--output", help="Output filename", default="output.mid")
     
-    # Defaults changed to None so we can identify when to run the Auto-Color mood check
     parser.add_argument("--melody", type=int, default=None)
     parser.add_argument("--chord", type=int, default=None)
     parser.add_argument("--bass", type=int, default=None)
@@ -211,7 +222,7 @@ def main():
         humanize=is_humanized
     )
     midi_data.save(args.output)
-    print(f"🎵 Synthesized track written to: {args.output}")
+    print(f"🎵 Image-translated rhythm pattern exported to: {args.output}")
 
 if __name__ == "__main__":
     main()
