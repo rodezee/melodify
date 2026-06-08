@@ -6,15 +6,16 @@ import mido
 from mido import Message, MidiFile, MidiTrack
 
 def get_scale():
-    # A Minor / C Major Pentatonic Scale
-    bass_scale = [36, 40, 43, 45, 48]          # Low End
-    chord_scale = [48, 52, 55, 57, 60, 64, 67] # Mid Range
-    melody_scale = [60, 64, 67, 69, 72, 76, 79, 81, 84] # High End
+    # A Minor Pentatonic / C Major Pentatonic distributions
+    bass_scale = [36, 40, 43, 45, 48]          
+    chord_scale = [48, 52, 55, 57, 60, 64, 67] 
+    melody_scale = [60, 64, 67, 69, 72, 76, 79, 81, 84, 88, 91] 
     return bass_scale, chord_scale, melody_scale
 
 def image_to_midi(image_path, humanize=False):
-    img = Image.open(image_path).convert('L')
-    img = img.resize((32, 30)) 
+    # Open image, keep a slightly higher resolution for edge accuracy, convert to grayscale
+    img_large = Image.open(image_path).convert('L')
+    img = img_large.resize((64, 30)) # 64 steps gives a longer, progressive 4-bar phrase!
     width, height = img.size
 
     mid = MidiFile()
@@ -22,102 +23,96 @@ def image_to_midi(image_path, humanize=False):
     mid.tracks.append(track)
     track.append(mido.MetaMessage('set_tempo', tempo=mido.bpm2tempo(120)))
 
-    # --- CHOOSE YOUR BAND INSTRUMENTS (General MIDI Standards) ---
-    # 0 = Piano, 4 = Rhodes, 16 = Organ, 33 = Finger Bass, 73 = Flute, 80 = Square Synth Lead
-    MELODY_INST = 80  
-    CHORD_INST = 16   
-    BASS_INST = 33    
-
-    # --- ASSIGN INSTRUMENTS TO CHANNELS ---
-    # channel=0 -> Melody, channel=1 -> Chords, channel=2 -> Bass
-    track.append(Message('program_change', program=MELODY_INST, channel=0, time=0))
-    track.append(Message('program_change', program=CHORD_INST, channel=1, time=0))
-    track.append(Message('program_change', program=BASS_INST, channel=2, time=0))
+    # Assign Multi-Channel Instruments
+    track.append(Message('program_change', program=80, channel=0, time=0)) # Melody: Synth
+    track.append(Message('program_change', program=16, channel=1, time=0)) # Chords: Organ
+    track.append(Message('program_change', program=33, channel=2, time=0)) # Bass: Electric
 
     bass_scale, chord_scale, melody_scale = get_scale()
-
-    # Keep track of active notes per channel to turn them off safely: (pitch, channel)
     active_notes = []
 
+    # Scan horizontally
     for x in range(width):
-        step_notes = [] # Format: (pitch, velocity, channel)
+        step_notes = [] 
         
-        # 1. BASS ZONE (Channel 2)
+        # We look ahead to calculate the change (delta) to find visual EDGES
+        x_next = min(x + 1, width - 1)
+
+        # 1. BASS ZONE (Bottom 10 rows)
         if x % 4 == 0:
-            bass_pixels = []
+            bass_edges = []
             for y in range(20, 30):
-                brightness = img.getpixel((x, y))
-                if brightness > 100:
-                    bass_pixels.append((y, brightness))
-            if bass_pixels:
-                best_y, b_val = max(bass_pixels, key=lambda item: item[1])
+                edge_value = abs(img.getpixel((x, y)) - img.getpixel((x_next, y)))
+                if edge_value > 20: # Edge threshold
+                    bass_edges.append((y, edge_value))
+            if bass_edges:
+                # Target the sharpest structural edge
+                best_y, edge_strength = max(bass_edges, key=lambda item: item[1])
                 idx = int(((29 - best_y) / 10) * len(bass_scale))
                 idx = min(len(bass_scale) - 1, max(0, idx))
-                vel = int((b_val / 255) * 85) + 25
+                vel = min(110, int((edge_strength / 255) * 60) + 50)
                 step_notes.append((bass_scale[idx], vel, 2))
 
-        # 2. CHORD ZONE (Channel 1)
+        # 2. CHORD ZONE (Middle 10 rows)
         if x % 2 == 0:
-            chord_pixels = []
+            chord_edges = []
             for y in range(10, 20):
-                brightness = img.getpixel((x, y))
-                if brightness > 120:
+                edge_value = abs(img.getpixel((x, y)) - img.getpixel((x_next, y)))
+                if edge_value > 25:
                     idx = int(((19 - y) / 10) * len(chord_scale))
                     idx = min(len(chord_scale) - 1, max(0, idx))
-                    vel = int((brightness / 255) * 65) + 20
-                    chord_pixels.append((chord_scale[idx], vel))
+                    vel = min(90, int((edge_value / 255) * 50) + 40)
+                    chord_edges.append((chord_scale[idx], vel))
             
-            unique_chords = list(set(chord_pixels))
+            unique_chords = list(set(chord_edges))
             if len(unique_chords) > 2:
                 unique_chords = random.sample(unique_chords, 2)
             for pitch, vel in unique_chords:
                 step_notes.append((pitch, vel, 1))
 
-        # 3. MELODY ZONE (Channel 0)
-        melody_pixels = []
+        # 3. MELODY ZONE (Top 10 rows)
+        melody_edges = []
         for y in range(0, 10):
-            brightness = img.getpixel((x, y))
-            if brightness > 140:
-                melody_pixels.append((y, brightness))
-        if melody_pixels:
-            best_y, b_val = max(melody_pixels, key=lambda item: item[1])
+            edge_value = abs(img.getpixel((x, y)) - img.getpixel((x_next, y)))
+            if edge_value > 30: 
+                melody_edges.append((y, edge_value))
+        if melody_edges:
+            best_y, edge_strength = max(melody_edges, key=lambda item: item[1])
             idx = int(((9 - best_y) / 10) * len(melody_scale))
             idx = min(len(melody_scale) - 1, max(0, idx))
-            vel = int((b_val / 255) * 95)
+            vel = min(120, int((edge_strength / 255) * 70) + 50)
             step_notes.append((melody_scale[idx], vel, 0))
 
-        # Humanize velocities
+        # Velocity Humanizer
         if humanize:
             processed = []
             for pitch, vel, ch in step_notes:
-                vel += random.randint(-10, 10)
-                vel = max(30, min(120, vel))
+                vel += random.randint(-12, 12)
+                vel = max(35, min(120, vel))
                 processed.append((pitch, vel, ch))
             step_notes = processed
 
-        # --- MIDI Note Event Execution ---
-        # 1. Clear out all playing notes from the previous step
+        # Clear past events
         for old_pitch, old_ch in active_notes:
             track.append(Message('note_off', note=old_pitch, velocity=0, channel=old_ch, time=0))
         active_notes.clear()
 
-        # 2. Fire up the new multi-instrument notes simultaneously
+        # Fire current notes
         for pitch, vel, ch in step_notes:
             track.append(Message('note_on', note=pitch, velocity=vel, channel=ch, time=0))
             active_notes.append((pitch, ch))
 
-        # 3. Rest gap duration (16th note timing step)
+        # Advance timeline by a 16th note (120 ticks)
         track.append(Message('note_off', note=0, velocity=0, channel=0, time=120))
 
-    # Clean up trailing note ring
     for old_pitch, old_ch in active_notes:
         track.append(Message('note_off', note=old_pitch, velocity=0, channel=old_ch, time=0))
 
     return mid
 
 def main():
-    parser = argparse.ArgumentParser(description="Multi-Instrument Image-to-MIDI Converter.")
-    parser.add_argument("image", help="Path to the image file")
+    parser = argparse.ArgumentParser(description="Edge-Detecting Image-to-MIDI Converter.")
+    parser.add_argument("image", help="Path to image file")
     parser.add_argument("--velocity", choices=["humanize", "default"], default="default")
     parser.add_argument("--soundfont", help="Path to soundfont file")
     parser.add_argument("--output", help="Output filename", default="output.mid")
@@ -125,10 +120,10 @@ def main():
     args = parser.parse_args()
     is_humanized = (args.velocity == "humanize")
     
-    print(f"🎸 Initializing 3-piece band layout for {args.image}...")
+    print(f"👁️ Scanning structural contours of {args.image}...")
     midi_data = image_to_midi(args.image, humanize=is_humanized)
     midi_data.save(args.output)
-    print(f"🎵 Multi-instrument arrangement written to: {args.output}")
+    print(f"🎵 Unique multi-instrument loop exported to: {args.output}")
 
 if __name__ == "__main__":
     main()
