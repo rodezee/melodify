@@ -10,6 +10,7 @@ chmod +x melodify
 ```
 
 # use
+Get yourself a JPG picture and run:
 ```
 ./melodify picture.jpg
 

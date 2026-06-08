@@ -61,11 +61,12 @@ def main():
     parser.add_argument("--velocity", choices=["humanize", "default"], default="default", 
                         help="Choose whether to humanize the note velocities.")
     # Soundfont argument accepted to match your syntax, though handled by Fluidsynth later
-    parser.add_argument("--soundfont", help="Path to FluidSynth soundfont.sf2") 
+    parser.add_argument("--soundfont", help="Path to FluidSynth soundfont.sf2")
+    parser.add_argument("--output", help="<output.mid> filename soundfont.sf2", default="output.mid")
 
     args = parser.parse_args()
 
-    output_midi = "output.mid"
+    output_midi = args.output
     is_humanized = (args.velocity == "humanize")
     
     print(f"🎨 Analyzing {args.image}...")
