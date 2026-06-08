@@ -216,7 +216,7 @@ def main():
     parser.add_argument("image", help="Path to image file")
     parser.add_argument("--velocity", choices=["humanize", "default"], default="default")
     parser.add_argument("--output", help="Output <filename>")
-    parser.add_argument("--tempo", type=int, default=120, help="Base baseline tempo (BPM)")
+    parser.add_argument("--tempo", type=int, default=160, help="Base baseline tempo (BPM)")
     
     parser.add_argument("--melody", type=int, default=None)
     parser.add_argument("--chord", type=int, default=None)
