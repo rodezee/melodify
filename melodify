@@ -58,7 +58,7 @@ def analyze_image_color_mood(img_rgb):
 
     return melody, chord, bass
 
-def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=False):
+def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, base_bpm, humanize=False):
     img_orig = Image.open(image_path).convert('RGB')
     
     if melody_patch is None or chord_patch is None or bass_patch is None:
@@ -75,7 +75,10 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
     mid = MidiFile()
     track = MidiTrack()
     mid.tracks.append(track)
-    track.append(mido.MetaMessage('set_tempo', tempo=mido.bpm2tempo(120)))
+    
+    # Establish the global baseline tempo set via arguments
+    track.append(mido.MetaMessage('set_tempo', tempo=mido.bpm2tempo(base_bpm)))
+    print(f" ▸ Tempo (BPM): #{base_bpm}")
 
     track.append(Message('program_change', program=melody_patch, channel=0, time=0))
     track.append(Message('program_change', program=chord_patch, channel=1, time=0))
@@ -89,10 +92,7 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
         step_notes = [] 
         x_next = min(x + 1, width - 1)
 
-        # ----------------------------------------------------
-        # 1. IMAGE-DRIVEN DYNAMIC DRUM GENERATOR
-        # ----------------------------------------------------
-        # Calculate the raw visual contrast change for this exact vertical slice
+        # Calculate the raw visual contrast change for this vertical slice
         slice_deltas = [abs(img.getpixel((x, y)) - img.getpixel((x_next, y))) for y in range(height)]
         avg_delta = sum(slice_deltas) / len(slice_deltas)
         max_delta = max(slice_deltas) if slice_deltas else 0
@@ -100,6 +100,19 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
         # Look at pixel columns to find where white/light masses are clumped vertically
         col_brightness = [img.getpixel((x, y)) for y in range(height)]
         avg_brightness = sum(col_brightness) / len(col_brightness)
+
+        # ----------------------------------------------------
+        # DYNAMIC TIME STRETCHING BASED ON IMAGE DENSITY
+        # ----------------------------------------------------
+        # Standard step size is 120 ticks. We scale it contextually.
+        if avg_delta < 15:
+            # Low contrast / flat areas slow down time to breathe (longer notes)
+            step_duration = 180  
+        elif avg_delta > 42:
+            # Dense / high frequency patterns compress time (faster rhythmic bursts)
+            step_duration = 75   
+        else:
+            step_duration = 120
 
         # A. Hi-Hat Rhythms (Varies texture based on image lighting)
         if x % 2 == 0:
@@ -111,18 +124,14 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
             step_notes.append((42, 55, 9))      # Extra rapid 16th hat roll on highly complex lines
 
         # B. Image Edge-Driven Kick Drum
-        # Instead of every step 0, 4, 8... the kick is triggered by the composition's contours
-        # We enforce a baseline safety kick on step 0 to keep the rhythm grounded.
         if x == 0 or (avg_delta > 25 and x % 2 == 0):
             kick_vel = min(115, int((avg_delta / 255) * 50) + 70)
             step_notes.append((36, kick_vel, 9))
 
         # C. Image Edge-Driven Snare Drum
-        # Triggers when a sharp visual feature boundary lands on off-beats
         if avg_delta > 45 and x % 4 != 0:
             snare_vel = min(110, int((max_delta / 255) * 40) + 70)
             step_notes.append((38, snare_vel, 9))
-        # Structural fallback so it doesn't lose a downbeat groove completely
         elif x % 8 == 4:
             step_notes.append((38, 85, 9))
 
@@ -194,7 +203,8 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, humanize=Fa
             track.append(Message('note_on', note=pitch, velocity=vel, channel=ch, time=0))
             active_notes.append((pitch, ch))
 
-        track.append(Message('note_off', note=0, velocity=0, channel=0, time=120))
+        # Use our image-derived duration instead of hardcoded 120 ticks
+        track.append(Message('note_off', note=0, velocity=0, channel=0, time=step_duration))
 
     for old_pitch, old_ch in active_notes:
         track.append(Message('note_off', note=old_pitch, velocity=0, channel=old_ch, time=0))
@@ -207,6 +217,7 @@ def main():
     parser.add_argument("--velocity", choices=["humanize", "default"], default="default")
     parser.add_argument("--soundfont", help="Path to soundfont file")
     parser.add_argument("--output", help="Output <filename>")
+    parser.add_argument("--tempo", type=int, default=120, help="Base baseline tempo (BPM)")
     
     parser.add_argument("--melody", type=int, default=None)
     parser.add_argument("--chord", type=int, default=None)
@@ -220,15 +231,17 @@ def main():
         melody_patch=args.melody, 
         chord_patch=args.chord, 
         bass_patch=args.bass, 
+        base_bpm=args.tempo,
         humanize=is_humanized
     )
     
     if args.output:
         midi_data.save(args.output)
-        print(f"🎵 Dynamic elasticity arrangement saved to: {args.output}")
+        print(f"🎵 Arrangement saved to: {args.output}")
     else:
-        midi_data.save(os.path.splitext(args.image)[0] + '.mid')
-        print(f"🎵 Dynamic elasticity arrangement saved to: {os.path.splitext(args.image)[0]}.mid")
+        output_name = os.path.splitext(args.image)[0] + '.mid'
+        midi_data.save(output_name)
+        print(f"🎵 Arrangement automatically saved to: {output_name}")
       
 if __name__ == "__main__":
     main()
