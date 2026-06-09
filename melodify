@@ -2,6 +2,7 @@
 import argparse
 import os
 import random
+import math
 from PIL import Image
 import mido
 from mido import Message, MidiFile, MidiTrack
@@ -13,7 +14,6 @@ def get_scale():
     return bass_scale, chord_scale, melody_scale
 
 def analyze_image_color_mood(img_rgb):
-    # Resize and grab dominant palette to extract real pixel distributions
     small_img = img_rgb.resize((100, 100))
     paletted = small_img.convert('P', palette=Image.Palette.ADAPTIVE, colors=4)
     
@@ -29,7 +29,6 @@ def analyze_image_color_mood(img_rgb):
             b = rgb_palette[idx+2]
             dominant_rgb_colors.append((r, g, b, count))
 
-    # Identify the overall most vibrant pixel mix (ignoring pure blacks/whites)
     best_r, best_g, best_b = 127, 127, 127
     highest_vibrancy = -1
     
@@ -43,23 +42,19 @@ def analyze_image_color_mood(img_rgb):
 
     print(f"🎨 Pure RGB Values Derived -> Red: {best_r}, Green: {best_g}, Blue: {best_b}")
 
-    # ----------------------------------------------------
-    # DIRECT RGB MATRICES TO GENERAL MIDI CONVERSION
-    # ----------------------------------------------------
-    # Melody (Driven by Red intensity): Maps raw 0-255 scaling into GM Patches 0-103
-    # 0-31: Acoustic/Mallets | 32-63: Organ/Guitar/Strings | 64-79: Reed/Pipe | 80-103: Synth Lead/Pad
     melody = int((best_r / 255.0) * 103)
-
-    # Chords (Driven by Green intensity): Maps raw 0-255 scaling into GM Patches 0-103
-    # Low Green favors classical strings/pianos, high Green transitions to ambient synth spaces
     chord = int((best_g / 255.0) * 103)
-
-    # Bass (Driven by Blue intensity): Maps raw 0-255 directly into the GM Bass Category (32-39)
-    # 32: Acoustic | 33: Finger | 34: Pick | 35: Fretless | 36/37: Slap | 38/39: Synth Bass
     bass = 32 + int((best_b / 255.0) * 7)
 
     print(f"🎛️ Generative Mapping -> Melody Patch: #{melody} | Chord Patch: #{chord} | Bass Patch: #{bass}")
     return melody, chord, bass
+
+def scale_velocity(raw_val, max_input, min_output, max_output):
+    """Applies a smooth logarithmic curve to translate pixel edges into human velocities."""
+    if raw_val <= 0:
+        return min_output
+    factor = math.log(raw_val) / math.log(max_input)
+    return int(min_output + (max_output - min_output) * min(1.0, factor))
 
 def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, base_bpm, humanize=False):
     img_orig = Image.open(image_path).convert('RGB')
@@ -75,69 +70,119 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, base_bpm, h
     img = img_orig.convert('L').resize((64, 30))
     width, height = img.size
 
-    mid = MidiFile()
-    track = MidiTrack()
-    mid.tracks.append(track)
+    mid = MidiFile(type=1)
     
-    # Establish the global baseline tempo set via arguments
-    track.append(mido.MetaMessage('set_tempo', tempo=mido.bpm2tempo(base_bpm)))
-    print(f" ▸ Tempo (BPM): {base_bpm}")
-
-    track.append(Message('program_change', program=melody_patch, channel=0, time=0))
-    track.append(Message('program_change', program=chord_patch, channel=1, time=0))
-    track.append(Message('program_change', program=bass_patch, channel=2, time=0))
-    track.append(Message('program_change', program=0, channel=9, time=0)) 
+    music_track = MidiTrack()
+    mid.tracks.append(music_track)
+    
+    drum_track = MidiTrack()
+    mid.tracks.append(drum_track)
+    
+    for t in [music_track, drum_track]:
+        t.append(mido.MetaMessage('set_tempo', tempo=mido.bpm2tempo(base_bpm)))
+        
+    music_track.append(Message('program_change', program=melody_patch, channel=0, time=0))
+    music_track.append(Message('program_change', program=chord_patch, channel=1, time=0))
+    music_track.append(Message('program_change', program=bass_patch, channel=2, time=0))
+    drum_track.append(Message('program_change', program=0, channel=9, time=0)) 
 
     bass_scale, chord_scale, melody_scale = get_scale()
-    active_notes = []
+    GLOBAL_STEP_TICKS = 120
 
+    # ----------------------------------------------------
+    # 1. INTERLACED DRUM SCANNER
+    # ----------------------------------------------------
+    max_deltas = [0.0] * 16
+    peak_deltas = [0.0] * 16
+    brightness_profiles = [0.0] * 16
+
+    for step in range(16):
+        offsets = [step, step + 16, step + 32, step + 48]
+        step_avg_deltas = []
+        step_max_deltas = []
+        step_brightness = []
+        
+        for x in offsets:
+            x_next = x - 1 if x == width - 1 else x + 1
+            slice_deltas = [abs(img.getpixel((x, y)) - img.getpixel((x_next, y))) for y in range(height)]
+            step_avg_deltas.append(sum(slice_deltas) / len(slice_deltas))
+            step_max_deltas.append(max(slice_deltas) if slice_deltas else 0)
+            
+            col_brightness = [img.getpixel((x, y)) for y in range(height)]
+            step_brightness.append(sum(col_brightness) / len(col_brightness))
+            
+        max_deltas[step] = max(step_avg_deltas)
+        peak_deltas[step] = max(step_max_deltas)
+        brightness_profiles[step] = sum(step_brightness) / len(step_brightness)
+
+    drum_loop = []
+    for step in range(16):
+        drum_step_notes = []
+        curr_delta = max_deltas[step]
+        curr_peak = peak_deltas[step]
+        curr_bright = brightness_profiles[step]
+
+        # Hi-Hats
+        if step % 2 == 0:
+            if curr_bright > 135:
+                drum_step_notes.append((46, 80))  
+            else:
+                drum_step_notes.append((42, 75))  
+        elif curr_delta > 25:
+            drum_step_notes.append((42, scale_velocity(curr_delta, 255, 40, 75)))
+
+        # Kicks
+        if step == 0 or (curr_delta > 22 and step % 2 == 0):
+            kick_vel = scale_velocity(curr_delta, 255, 70, 115)
+            drum_step_notes.append((36, kick_vel))
+
+        # Snares
+        if curr_delta > 35 and step % 4 != 0:
+            snare_vel = scale_velocity(curr_peak, 255, 70, 112)
+            drum_step_notes.append((38, snare_vel))
+        elif step % 8 == 4:
+            snare_vel = scale_velocity(curr_bright, 255, 75, 105)
+            drum_step_notes.append((38, snare_vel))
+            
+        drum_loop.append(drum_step_notes)
+
+    # Populate Drum Track
+    active_drums = []
+    for x in range(width):
+        loop_step = x % 16
+        step_notes = drum_loop[loop_step]
+        
+        for old_pitch in active_drums:
+            drum_track.append(Message('note_off', note=old_pitch, velocity=0, channel=9, time=0))
+        active_drums.clear()
+        
+        for pitch, vel in step_notes:
+            drum_track.append(Message('note_on', note=pitch, velocity=vel, channel=9, time=0))
+            active_drums.append(pitch)
+            
+        drum_track.append(Message('note_off', note=0, velocity=0, channel=9, time=GLOBAL_STEP_TICKS))
+
+    # ----------------------------------------------------
+    # 2. INSTRUMENT PIPELINE (With Voice-Leading & Note Gating)
+    # ----------------------------------------------------
+    active_music_notes = []
+    
     for x in range(width):
         step_notes = [] 
-        x_next = min(x + 1, width - 1)
+        x_next = x - 1 if x == width - 1 else x + 1
 
-        # Calculate the raw visual contrast change for this vertical slice
         slice_deltas = [abs(img.getpixel((x, y)) - img.getpixel((x_next, y))) for y in range(height)]
         avg_delta = sum(slice_deltas) / len(slice_deltas)
-        max_delta = max(slice_deltas) if slice_deltas else 0
 
-        # Look at pixel columns to find where white/light masses are clumped vertically
-        col_brightness = [img.getpixel((x, y)) for y in range(height)]
-        avg_brightness = sum(col_brightness) / len(col_brightness)
-
-        # ----------------------------------------------------
-        # DYNAMIC TIME STRETCHING BASED ON IMAGE DENSITY
-        # ----------------------------------------------------
+        # Dynamic Gating Engine: Flat image zones sustain notes; busy zones play staccato
         if avg_delta < 15:
-            step_duration = 180  
-        elif avg_delta > 42:
-            step_duration = 75   
+            gate_duration = int(GLOBAL_STEP_TICKS * 0.95)  # Legato hold
+        elif avg_delta > 40:
+            gate_duration = int(GLOBAL_STEP_TICKS * 0.40)  # Sharp staccato pluck
         else:
-            step_duration = 120
+            gate_duration = int(GLOBAL_STEP_TICKS * 0.75)  # Standard hold
 
-        # A. Hi-Hat Rhythms (Varies texture based on image lighting)
-        if x % 2 == 0:
-            if avg_brightness > 160:
-                step_notes.append((46, 85, 9))  # Open Hi-Hat if passing a bright patch
-            else:
-                step_notes.append((42, 75, 9))  # Standard Closed Hi-Hat
-        elif avg_delta > 35:
-            step_notes.append((42, 55, 9))      # Extra rapid 16th hat roll on highly complex lines
-
-        # B. Image Edge-Driven Kick Drum
-        if x == 0 or (avg_delta > 25 and x % 2 == 0):
-            kick_vel = min(115, int((avg_delta / 255) * 50) + 70)
-            step_notes.append((36, kick_vel, 9))
-
-        # C. Image Edge-Driven Snare Drum
-        if avg_delta > 45 and x % 4 != 0:
-            snare_vel = min(110, int((max_delta / 255) * 40) + 70)
-            step_notes.append((38, snare_vel, 9))
-        elif x % 8 == 4:
-            step_notes.append((38, 85, 9))
-
-        # ----------------------------------------------------
-        # 2. BASS ZONE (Channel 2)
-        # ----------------------------------------------------
+        # Bass Zone
         if x % 4 == 0:
             bass_edges = []
             for y in range(20, 30):
@@ -146,67 +191,66 @@ def image_to_midi(image_path, melody_patch, chord_patch, bass_patch, base_bpm, h
                     bass_edges.append((y, edge_value))
             if bass_edges:
                 best_y, edge_strength = max(bass_edges, key=lambda item: item[1])
-                idx = int(((29 - best_y) / 10) * len(bass_scale))
-                idx = min(len(bass_scale) - 1, max(0, idx))
-                vel = min(110, int((edge_strength / 255) * 50) + 55)
+                idx = min(len(bass_scale) - 1, max(0, int(((29 - best_y) / 10) * len(bass_scale))))
+                vel = scale_velocity(edge_strength, 255, 60, 105)
                 step_notes.append((bass_scale[idx], vel, 2))
 
-        # ----------------------------------------------------
-        # 3. CHORD ZONE (Channel 1)
-        # ----------------------------------------------------
+        # Chord Zone (Harmonic Cleansing Rule)
         if x % 2 == 0:
             chord_edges = []
             for y in range(10, 20):
                 edge_value = abs(img.getpixel((x, y)) - img.getpixel((x_next, y)))
-                if edge_value > 25:
-                    idx = int(((19 - y) / 10) * len(chord_scale))
-                    idx = min(len(chord_scale) - 1, max(0, idx))
-                    vel = min(85, int((edge_value / 255) * 40) + 45)
+                if edge_value > 22:
+                    idx = min(len(chord_scale) - 1, max(0, int(((19 - y) / 10) * len(chord_scale))))
+                    vel = scale_velocity(edge_value, 255, 45, 85)
                     chord_edges.append((chord_scale[idx], vel))
             
-            unique_chords = list(set(chord_edges))
-            if len(unique_chords) > 2:
-                unique_chords = random.sample(unique_chords, 2)
-            for pitch, vel in unique_chords:
+            # Filter and sort to ensure a clean voicing without adjacent note mud
+            chord_edges = sorted(list(set(chord_edges)), key=lambda item: item[0])
+            filtered_chords = []
+            for note_data in chord_edges:
+                if not filtered_chords or abs(note_data[0] - filtered_chords[-1][0]) >= 3:
+                    filtered_chords.append(note_data)
+                    
+            for pitch, vel in filtered_chords[:2]: # Limit to 2 cleanly separated voices
                 step_notes.append((pitch, vel, 1))
 
-        # ----------------------------------------------------
-        # 4. MELODY ZONE (Channel 0)
-        # ----------------------------------------------------
+        # Melody Zone
         melody_edges = []
         for y in range(0, 10):
             edge_value = abs(img.getpixel((x, y)) - img.getpixel((x_next, y)))
-            if edge_value > 30: 
+            if edge_value > 28: 
                 melody_edges.append((y, edge_value))
         if melody_edges:
             best_y, edge_strength = max(melody_edges, key=lambda item: item[1])
-            idx = int(((9 - best_y) / 10) * len(melody_scale))
-            idx = min(len(melody_scale) - 1, max(0, idx))
-            vel = min(120, int((edge_strength / 255) * 60) + 55)
+            idx = min(len(melody_scale) - 1, max(0, int(((9 - best_y) / 10) * len(melody_scale))))
+            vel = scale_velocity(edge_strength, 255, 60, 115)
             step_notes.append((melody_scale[idx], vel, 0))
 
-        # Humanize Pass
         if humanize:
             processed = []
             for pitch, vel, ch in step_notes:
-                vel += random.randint(-12, 12)
-                vel = max(35, min(125, vel))
+                vel = max(35, min(125, vel + random.randint(-10, 10)))
                 processed.append((pitch, vel, ch))
             step_notes = processed
 
-        # MIDI Execution
-        for old_pitch, old_ch in active_notes:
-            track.append(Message('note_off', note=old_pitch, velocity=0, channel=old_ch, time=0))
-        active_notes.clear()
+        # Cut off prior elements cleanly
+        for old_pitch, old_ch in active_music_notes:
+            music_track.append(Message('note_off', note=old_pitch, velocity=0, channel=old_ch, time=0))
+        active_music_notes.clear()
 
+        # Execute note triggers
         for pitch, vel, ch in step_notes:
-            track.append(Message('note_on', note=pitch, velocity=vel, channel=ch, time=0))
-            active_notes.append((pitch, ch))
+            music_track.append(Message('note_on', note=pitch, velocity=vel, channel=ch, time=0))
+            active_music_notes.append((pitch, ch))
 
-        track.append(Message('note_off', note=0, velocity=0, channel=0, time=step_duration))
-
-    for old_pitch, old_ch in active_notes:
-        track.append(Message('note_off', note=old_pitch, velocity=0, channel=old_ch, time=0))
+        # Separate note off events based on calculated gate length to preserve rhythm structure
+        music_track.append(Message('note_off', note=0, velocity=0, channel=0, time=gate_duration))
+        
+        for pitch, vel, ch in step_notes:
+            music_track.append(Message('note_off', note=pitch, velocity=0, channel=ch, time=0))
+            
+        music_track.append(Message('note_off', note=0, velocity=0, channel=0, time=GLOBAL_STEP_TICKS - gate_duration))
 
     return mid
 
@@ -215,7 +259,7 @@ def main():
     parser.add_argument("image", help="Path to image file")
     parser.add_argument("--velocity", choices=["humanize", "default"], default="default")
     parser.add_argument("--output", help="Output <filename>")
-    parser.add_argument("--tempo", type=int, default=140, help="Base baseline tempo (BPM)")
+    parser.add_argument("--tempo", type=int, default=120, help="Base baseline tempo (BPM)")
     
     parser.add_argument("--melody", type=int, default=None)
     parser.add_argument("--chord", type=int, default=None)
