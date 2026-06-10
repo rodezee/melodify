@@ -1,4 +1,6 @@
-# melodify
+# 🎹 Melodify
+
+Generate MIDI melodies from pictures
 
 # install
 ```
